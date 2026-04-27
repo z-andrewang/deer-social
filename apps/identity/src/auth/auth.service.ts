@@ -1,38 +1,65 @@
-import { Injectable, UnauthorizedException, ConflictException } from '@nestjs/common';
+import {
+  Injectable,
+  ConflictException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { Response } from 'express';
-import * as bcrypt from 'bcryptjs';
-import { prisma } from '@deer-social/database';
+import * as bcrypt from 'bcrypt';
+import { PrismaService } from '../prisma/prisma.service';
+import { RegisterDto } from './dto/register.dto';
+import { LoginDto } from './dto/login.dto';
+
+interface JwtPayload {
+  sub: string;
+  email?: string;
+  isVerified?: boolean;
+  role?: string;
+  purpose?: string;
+}
 
 @Injectable()
 export class AuthService {
-  constructor(private readonly jwtService: JwtService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly jwtService: JwtService,
+  ) {}
 
-  async register(dto: { email: string; password: string }) {
-    const existing = await prisma.user.findUnique({ where: { email: dto.email } });
+  async register(dto: RegisterDto) {
+    const existing = await this.prisma.user.findUnique({
+      where: { email: dto.email },
+    });
     if (existing) {
       throw new ConflictException('Email already registered');
     }
 
     const passwordHash = await bcrypt.hash(dto.password, 12);
-    const user = await prisma.user.create({
+    const user = await this.prisma.user.create({
       data: {
         email: dto.email,
         passwordHash,
       },
+      select: {
+        id: true,
+        email: true,
+        isVerified: true,
+        role: true,
+        createdAt: true,
+      },
     });
 
-    return { id: user.id, email: user.email };
+    return user;
   }
 
-  async login(dto: { email: string; password: string }, res: Response) {
-    const user = await prisma.user.findUnique({ where: { email: dto.email } });
+  async login(dto: LoginDto) {
+    const user = await this.prisma.user.findUnique({
+      where: { email: dto.email },
+    });
     if (!user) {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    const valid = await bcrypt.compare(dto.password, user.passwordHash);
-    if (!valid) {
+    const isMatch = await bcrypt.compare(dto.password, user.passwordHash);
+    if (!isMatch) {
       throw new UnauthorizedException('Invalid credentials');
     }
 
@@ -40,89 +67,82 @@ export class AuthService {
       throw new UnauthorizedException('Account has been banned');
     }
 
-    const payload = {
-      userId: user.id,
+    return {
+      id: user.id,
       email: user.email,
       isVerified: user.isVerified,
       role: user.role,
     };
+  }
 
-    const accessToken = this.jwtService.sign(payload, { expiresIn: '2h' });
-    const refreshToken = this.jwtService.sign(payload, { expiresIn: '7d' });
+  generateTokens(user: {
+    id: string;
+    email: string;
+    isVerified: boolean;
+    role: string;
+  }) {
+    const accessPayload = {
+      sub: user.id,
+      email: user.email,
+      isVerified: user.isVerified,
+      role: user.role,
+    };
+    const refreshPayload = { sub: user.id };
 
-    res.cookie('access_token', accessToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 2 * 60 * 60 * 1000,
+    const accessToken = this.jwtService.sign(accessPayload, {
+      expiresIn: '2h',
+    });
+    const refreshToken = this.jwtService.sign(refreshPayload, {
+      expiresIn: '7d',
     });
 
-    res.cookie('refresh_token', refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
-
-    return { message: 'Login successful' };
+    return { accessToken, refreshToken };
   }
 
-  async logout(res: Response) {
-    res.clearCookie('access_token');
-    res.clearCookie('refresh_token');
-    return { message: 'Logout successful' };
-  }
-
-  async refresh(refreshToken: string, res: Response) {
-    if (!refreshToken) {
-      throw new UnauthorizedException('No refresh token');
-    }
-
-    try {
-      const payload = this.jwtService.verify(refreshToken);
-      const user = await prisma.user.findUnique({ where: { id: payload.userId } });
-
-      if (!user || user.isBanned) {
-        throw new UnauthorizedException('Invalid token');
-      }
-
-      const newPayload = {
-        userId: user.id,
-        email: user.email,
-        isVerified: user.isVerified,
-        role: user.role,
-      };
-
-      const accessToken = this.jwtService.sign(newPayload, { expiresIn: '2h' });
-      const newRefreshToken = this.jwtService.sign(newPayload, { expiresIn: '7d' });
-
-      res.cookie('access_token', accessToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        maxAge: 2 * 60 * 60 * 1000,
-      });
-
-      res.cookie('refresh_token', newRefreshToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        maxAge: 7 * 24 * 60 * 60 * 1000,
-      });
-
-      return { message: 'Token refreshed' };
-    } catch {
-      throw new UnauthorizedException('Invalid refresh token');
-    }
-  }
-
-  async sendVerifyEmail(userId: string) {
-    // TODO: implement email sending
-    return { message: 'Verification email sent' };
+  generateVerifyToken(userId: string, email: string) {
+    return this.jwtService.sign(
+      { sub: userId, email, purpose: 'email-verification' },
+      { expiresIn: '24h' },
+    );
   }
 
   async verifyEmailCallback(token: string) {
-    // TODO: implement email verification
-    return { message: 'Email verified' };
+    try {
+      const payload = this.jwtService.verify<JwtPayload>(token, {
+        secret: process.env.JWT_SECRET!,
+      });
+      if (payload.purpose !== 'email-verification') {
+        throw new UnauthorizedException('Invalid token');
+      }
+      await this.prisma.user.update({
+        where: { id: payload.sub },
+        data: { isVerified: true },
+      });
+      return { message: 'Email verified successfully' };
+    } catch {
+      throw new UnauthorizedException('Invalid or expired token');
+    }
+  }
+
+  async refresh(refreshToken: string) {
+    try {
+      const payload = this.jwtService.verify<JwtPayload>(refreshToken, {
+        secret: process.env.JWT_SECRET!,
+      });
+      const user = await this.prisma.user.findUnique({
+        where: { id: payload.sub },
+      });
+      if (!user) {
+        throw new UnauthorizedException('Invalid refresh token');
+      }
+      return this.generateTokens({
+        id: user.id,
+        email: user.email,
+        isVerified: user.isVerified,
+        role: user.role,
+      });
+    } catch {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
   }
 }
