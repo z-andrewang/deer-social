@@ -6,13 +6,16 @@ import {
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
-import type { Response } from 'express';
 
 export interface ApiResponse<T> {
   success: boolean;
   code: number;
   message: string;
   data: T;
+}
+
+interface ReplyWithStatusCode {
+  statusCode: number;
 }
 
 @Injectable()
@@ -26,7 +29,7 @@ export class ResponseInterceptor<T> implements NestInterceptor<
   ): Observable<ApiResponse<T>> {
     return next.handle().pipe(
       map((data) => {
-        const res = context.switchToHttp().getResponse<Response>();
+        const res = context.switchToHttp().getResponse<ReplyWithStatusCode>();
         const response: ApiResponse<T> = {
           success: true,
           code: res.statusCode || 200,

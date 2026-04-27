@@ -1,10 +1,13 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { Strategy, ExtractJwt } from 'passport-jwt';
-import { Request } from 'express';
 import { PrismaService } from '../../prisma/prisma.service';
 
-const cookieExtractor = (req: Request): string | null => {
+interface RequestWithCookies {
+  cookies: Record<string, string | undefined>;
+}
+
+const cookieExtractor = (req: RequestWithCookies): string | null => {
   return req.cookies?.access_token || null;
 };
 
